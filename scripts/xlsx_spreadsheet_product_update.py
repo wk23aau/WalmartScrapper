@@ -111,7 +111,10 @@ def extract_key_features(keyfeatures_raw, summary):
         keyfeatures = []
 
     if len(" ".join(keyfeatures)) < 40:
-        keyfeatures = summary.split(". ")
+        if isinstance(summary, str): # Check if summary is a string before splitting
+            keyfeatures = summary.split(". ")
+        else:
+            keyfeatures = [] # Handle case where summary is not a string
 
     if keyfeatures: # Check if keyfeatures is not empty before indexing
         key_feature_1 = keyfeatures[0] if len(keyfeatures) > 0 else ""
@@ -184,6 +187,77 @@ def calculate_referral_fee(category, price):
                 return tiers[threshold]
     return default_rate
 
+def extract_details_keyword_grouped(details_text):
+    """
+    Extracts values from a text string based on the keyword '{"details":"'.
+    Takes the text after '{"details":"' until the next '}'.
+    Groups the extracted values into pairs.
+
+    Args:
+        details_text (str): The input text string.
+
+    Returns:
+        dict: A dictionary with "AD values" key containing a list of lists,
+              where each inner list is a pair of extracted values.
+    """
+
+    extracted_values = []
+    start_index = 0
+    while True:
+        start_keyword_index = details_text.find('{"details":"', start_index)
+        if start_keyword_index == -1:
+            break  # No more keywords found
+
+        value_start_index = start_keyword_index + len('{"details":"')
+        value_end_index = details_text.find('"}', value_start_index)
+
+        if value_end_index != -1:
+            value = details_text[value_start_index:value_end_index]
+            extracted_values.append(value)
+            start_index = value_end_index + len('"}') # Move start_index past the closing "}"
+        else:
+            break  # Malformed data, no closing '}' found
+
+    output_dict = {"AD values": []} # Changed key name to "AD values"
+    value_pairs = []
+    for index, value in enumerate(extracted_values):
+        value_pairs.append(value)
+        if (index + 1) % 2 == 0: # Form pairs every two values
+            output_dict["AD values"].append(value_pairs)
+            value_pairs = [] # Reset for the next pair
+    if value_pairs: # Handle odd number of values if any remain
+        output_dict["AD values"].append(value_pairs) # Append the last incomplete pair
+
+    return output_dict
+
+def extract_details_excel_keyword_grouped(excel_file):
+    """
+    Extracts details from an XLSX file, processing the 'details' column
+    using the keyword-based extraction and grouping logic.
+    Skips rows where 'details' column is empty or not a string.
+
+    Args:
+        excel_file (str): Path to the XLSX file.
+
+    Returns:
+        dict: A dictionary where keys are row indices and values are dictionaries
+              containing the grouped extracted values under the "AD values" key.
+              Only includes rows with valid 'details' content.
+    """
+
+    df = pd.read_excel(excel_file)
+    extracted_data_dict = {}
+
+    for index, row in df.iterrows():
+        details_text = row['details']
+        if not isinstance(details_text, str) or not details_text: # Check if details_text is valid and not empty
+            continue # Skip to the next row if details_text is not a valid string or is empty
+
+        row_output = extract_details_keyword_grouped(details_text)
+        extracted_data_dict[index] = row_output
+
+    return extracted_data_dict
+
 
 def load_excel(file_path):
     """Load and preprocess Excel file."""
@@ -231,11 +305,13 @@ def batch_update_sheet(worksheet, updates): # Renamed to avoid name conflict
     if updates:
         worksheet.batch_update(updates)
 
-def append_new_rows_sheet(worksheet, new_rows, selling_price_column_index, referral_fee_column_index, product_category_column_index, shipping_column_index, label_fee_column_index, processing_fee_column_index, profit_loss_column_index, sku_column_index): # Modified to accept new column indices
+def append_new_rows_sheet(worksheet, new_rows, selling_price_column_index, referral_fee_column_index, product_category_column_index, shipping_column_index, label_fee_column_index, processing_fee_column_index, profit_loss_column_index, sku_column_index, detail_columns_start_index): # Modified to accept new column indices and detail columns start
     """Append new rows and format price column with default value and background."""
     if new_rows:
         next_row = len(worksheet.get_all_values()) + 1
-        worksheet.insert_rows(new_rows, row=next_row)
+        # Prepare data for initial row insertion (excluding details_dict)
+        rows_to_insert = [row[:-1] for row in new_rows] # Exclude the last element (details_dict) from each row
+        worksheet.insert_rows(rows_to_insert, row=next_row)
 
         # --- Formatting and Default Values for New Columns ---
 
@@ -278,10 +354,29 @@ def append_new_rows_sheet(worksheet, new_rows, selling_price_column_index, refer
         sku_values = []
         for i in range(len(new_rows)): # Generate SKU for each new row
             product_id_val = new_rows[i][1] # Product ID is in the 2nd column (index 1) of new_rows
-            price_val = new_rows[i][4]      # Price is in the 5th column (index 4) of new_rows
+            price_val = new_rows[i][4]     # Price is in the 5th column (index 4) of new_rows
             sku = f"{product_id_val}-{price_val}-PK-WMPL" # Create SKU string
             sku_values.append([sku])
         worksheet.update(sku_range, sku_values)
+
+        # --- Detail Column (AD - "Details") ---
+        header_cell = f"{detail_columns_start_index}1" # Cell for "Details" header (e.g., AD1)
+        header_row_values = worksheet.row_values(1)
+        if 'Details' not in header_row_values:
+            worksheet.update(header_cell, [['Details']]) # Set "Details" header in column AD
+
+        for row_index, detail_data in enumerate(new_rows):
+            details_dict = detail_data[-1] # Details Dictionary is now the *last* element of each row
+            details_text_list = [] # List to store detail strings for concatenation
+
+            for detail_pair in details_dict.get("AD values", []): # Iterate through detail pairs
+                for detail_value in detail_pair: # Iterate through values in each pair
+                    details_text_list.append(detail_value) # Add each detail value to the list
+
+            combined_details_text = "\n".join(details_text_list) # Concatenate details with newline
+
+            cell_range = f"{detail_columns_start_index}{next_row + row_index}" # Cell in "Details" column for current row
+            worksheet.update(cell_range, [[combined_details_text]]) # Write concatenated details to "Details" column
 
 
 # --- Main Script ---
@@ -308,7 +403,7 @@ def main():
         return
 
 
-    required_columns = ["web-scraper-start-url", "heading", "brand", "market_price", "images", "summary", "keyfeatures", "schema_org_breadcrumbs"] # Added schema_org_breadcrumbs
+    required_columns = ["web-scraper-start-url", "heading", "brand", "market_price", "images", "summary", "keyfeatures", "schema_org_breadcrumbs", "details"] # Added details column
     if not all(col in df.columns for col in required_columns):
         print("Required columns not found in the Excel file. Found columns:", df.columns.tolist())
         return
@@ -367,16 +462,19 @@ def main():
         headers_to_update['X1'] = [['Referral Fee Percentage']] # Column X for Referral Fee Percentage
     # --- Referral Fee Percentage and Selling Price Headers (Columns Y and Z) ---
     if 'Shipping' not in header_row:
-        headers_to_update['Y1'] = [['Shipping']]        # Column Y for Shipping
+        headers_to_update['Y1'] = [['Shipping']]      # Column Y for Shipping
     if 'Selling Price' not in header_row:
-        headers_to_update['Z1'] = [['Selling Price']]     # Column Z for Selling Price
+        headers_to_update['Z1'] = [['Selling Price']]   # Column Z for Selling Price
     # --- New Columns: Label Fee, Processing Fee, Profit/Loss ---
     if 'Label Fee' not in header_row:
-        headers_to_update['AA1'] = [['Label Fee']]       # Column AA for Label Fee
+        headers_to_update['AA1'] = [['Label Fee']]     # Column AA for Label Fee
     if 'Processing Fee' not in header_row:
-        headers_to_update['AB1'] = [['Processing Fee']]  # Column AB for Processing Fee
+        headers_to_update['AB1'] = [['Processing Fee']]    # Column AB for Processing Fee
     if 'Profit/Loss' not in header_row:
         headers_to_update['AC1'] = [['Profit/Loss']]     # Column AC for Profit/Loss
+    # --- Details Column Header ---
+    if 'Details' not in header_row:
+        headers_to_update['AD1'] = [['Details']]       # Column AD for Details
 
 
     if headers_to_update:
@@ -396,6 +494,8 @@ def main():
         product_category = get_product_category(category_names, category_urls, row.get("heading", ""), summary_text) # Determine product category
         referral_fee_percentage = calculate_referral_fee(product_category, selling_price) # Calculate referral fee using selling price
         sku = f"{product_id}-{numeric_price}-PK-WMPL" # Generate SKU
+        details_json_str = row.get('details', '[]') # Get details json string
+        details_dict = extract_details_keyword_grouped(details_json_str) # Extract details using keyword function
 
 
         if product_id and product_id in existing_product_ids:
@@ -431,9 +531,9 @@ def main():
 
         else:
             new_rows.append([
-                sku,                       # Column A: SKU (generated)
-                int(product_id),         # Column B: Product ID
-                row.get("heading", ""),    # Column C: Heading
+                sku,                  # Column A: SKU (generated)
+                int(product_id),          # Column B: Product ID
+                row.get("heading", ""),     # Column C: Heading
                 get_random_brand(),       # Column D: Brand
                 numeric_price,           # Column E: Price
                 image_urls[0] if len(image_urls) > 0 else "",  # Column F: Image 1
@@ -441,10 +541,10 @@ def main():
                 image_urls[2] if len(image_urls) > 2 else "",  # Column H: Image 3
                 image_urls[3] if len(image_urls) > 3 else "",  # Column I: Image 4
                 image_urls[4] if len(image_urls) > 4 else "",  # Column J: Image 5
-                summary_text,            # Column K: Summary
-                key_feature_1,         # Column L: Key Feature 1
-                key_feature_2,         # Column M: Key Feature 2
-                remaining_key_features,   # Column N: Remaining Key Features
+                summary_text,              # Column K: Summary
+                key_feature_1,          # Column L: Key Feature 1
+                key_feature_2,          # Column M: Key Feature 2
+                remaining_key_features,    # Column N: Remaining Key Features
                 category_names[0],           # Column O: Category 1
                 category_names[1],           # Column P: Category 2
                 category_names[2],           # Column Q: Category 3
@@ -454,12 +554,13 @@ def main():
                 category_urls[2],            # Column U: Category 3 URL
                 category_urls[3],             # Column V: Category 4 URL
                 product_category,          # Column W: Product Category
-                referral_fee_percentage,    # Column X: Referral Fee Percentage
-                DEFAULT_REFERRAL_FEE,       # Column Y: Shipping (Actually Referral Fee Percentage Default)
+                referral_fee_percentage,     # Column X: Referral Fee Percentage
+                DEFAULT_REFERRAL_FEE,      # Column Y: Shipping (Actually Referral Fee Percentage Default)
                 DEFAULT_SELLING_PRICE,       # Column Z: Selling Price
                 DEFAULT_LABEL_FEE,         # Column AA: Label Fee (Default Value)
                 DEFAULT_PROCESSING_FEE,    # Column AB: Processing Fee (Default Value)
-                ""                         # Column AC: Profit/Loss (Formula will be set in append_new_rows_sheet)
+                "",                      # Column AC: Profit/Loss (Formula will be set in append_new_rows_sheet)
+                details_dict               # Column AD onwards: details_dict
             ])
 
     batch_update_sheet(worksheet, updates)
@@ -474,18 +575,20 @@ def main():
         referral_fee_column_index = 'Y' # Column Y index
         product_category_column_index = 'W' # Column W index
         shipping_column_index = 'Y'      # Column Y index - Shipping (Though actually Referral Fee Percentage Default)
-        label_fee_column_index = 'AA'     # Column AA index
+        label_fee_column_index = 'AA'      # Column AA index
         processing_fee_column_index = 'AB' # Column AB index
-        profit_loss_column_index = 'AC'    # Column AC index
-        sku_column_index = 'A'           # Column A index
+        profit_loss_column_index = 'AC'      # Column AC index
+        sku_column_index = 'A'          # Column A index
+        detail_columns_start_index_char = 'AD' # Start of detail columns
 
-        append_new_rows_sheet(worksheet, new_rows, selling_price_column_index, referral_fee_column_index, product_category_column_index, shipping_column_index, label_fee_column_index, processing_fee_column_index, profit_loss_column_index, sku_column_index) # Pass all column indices to append function
+        append_new_rows_sheet(worksheet, new_rows, selling_price_column_index, referral_fee_column_index, product_category_column_index, shipping_column_index, label_fee_column_index, processing_fee_column_index, profit_loss_column_index, sku_column_index, detail_columns_start_index=detail_columns_start_index_char) # Pass detail_columns_start_index
 
 
     if new_rows:
-        print("New product data appended to Google Sheets with default selling price, referral fee percentage, label fee, processing fee, profit/loss formula and formatting.")
+        print("New product data appended to Google Sheets.")
     else:
-        print("No new product data to append.")
+        print("No new products to append.")
 
-if __name__ == "__main__":
+
+if __name__ == '__main__':
     main()

@@ -1,0 +1,21 @@
+{
+    "manifest_version": 3,
+    "name": "Product Scanner",
+    "version": "1.1",
+    "description": "Scans products and saves data to a file.",
+    "permissions": ["scripting", "downloads", "activeTab", "storage"],
+    "host_permissions": ["<all_urls>"],
+    "background": {
+        "service_worker": "background.js"
+    },
+    "action": {
+        "default_popup": "popup.html",
+        "default_icon": "icon.png"
+    },
+    "content_scripts": [
+        {
+            "matches": ["<all_urls>"],
+            "js": ["collect_all_search_pages.js"]
+        }
+    ]
+}
